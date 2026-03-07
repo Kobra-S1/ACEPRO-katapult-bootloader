@@ -1,0 +1,87 @@
+ACE Pro GD32F303CCT6 USB support for Katapult bootloader
+========================================================
+Adds MACH_STM32F103xC config variant (256KiB flash / 48KiB RAM) for
+GD32F303CC/CD/CE "HD" parts, enables STM32F1 32KiB app-start offset
+(for dual-boot with stock ACE firmware at 0x08008000), and fixes USB
+enumeration by driving the external D+ pullup on PB9 and adding a
+tSTARTUP delay after clearing FRES.
+
+Apply to a fresh Katapult clone:
+  git clone https://github.com/Arksine/katapult.git
+  cd katapult
+  git apply ../katapult-ace-gd32f303.patch
+
+Build with menuconfig:
+  STM32 → STM32F103 → 256KiB Flash / 48KiB RAM
+  USB on PA11/PA12, 32KiB bootloader offset, double-reset enabled
+
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index d45234c..eb4a5b9 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -93,6 +93,10 @@ config MACH_STM32F103x6
+     depends on LOW_LEVEL_OPTIONS && MACH_STM32F103
+     bool "Only 10KiB of RAM (for rare stm32f103x6 variant)"
+ 
++config MACH_STM32F103xC
++    depends on LOW_LEVEL_OPTIONS && MACH_STM32F103
++    bool "256KiB Flash / 48KiB RAM (STM32F103xC/xD/xE or GD32F303CC/CD/CE)"
++
+ config MACH_STM32F0
+     bool
+ config MACH_STM32F1
+@@ -172,6 +176,7 @@ config FLASH_SIZE
+     default 0x4000 if MACH_STM32F031
+     default 0x8000 if MACH_STM32F042
+     default 0x20000 if MACH_STM32F070 || MACH_STM32F072
++    default 0x40000 if MACH_STM32F103xC # Flash size for STM32F103xC / GD32F303CC (256KiB)
+     default 0x10000 if MACH_STM32F103 || MACH_STM32L412 # Flash size of stm32f103x8 (64KiB)
+     default 0x40000 if MACH_STM32F2 || MACH_STM32F401 || MACH_STM32H723
+     default 0x80000 if MACH_STM32F4x5 || MACH_STM32F446
+@@ -194,6 +199,7 @@ config RAM_SIZE
+     default 0x1800 if MACH_STM32F042
+     default 0x4000 if MACH_STM32F070 || MACH_STM32F072
+     default 0x2800 if MACH_STM32F103x6
++    default 0xC000 if MACH_STM32F103xC # RAM size for STM32F103xC / GD32F303CC (48KiB)
+     default 0x5000 if MACH_STM32F103 && !MACH_STM32F103x6 # Ram size of stm32f103x8
+     default 0x8000 if MACH_STM32G431
+     default 0xa000 if MACH_STM32L412
+@@ -497,7 +503,7 @@ choice
+     config STM32_APP_START_20000
+         bool "128KiB offset" if MACH_STM32H7 && !MACH_STM32H750
+     config STM32_APP_START_8000
+-        bool "32KiB offset" if MACH_STM32F2 || MACH_STM32F4 || MACH_STM32H750
++        bool "32KiB offset" if MACH_STM32F1 || MACH_STM32F2 || MACH_STM32F4 || MACH_STM32H750
+     config STM32_APP_START_4000
+         bool "16KiB offset" if MACH_STM32F2 || MACH_STM32F4
+     config STM32_APP_START_2000
+diff --git a/src/stm32/usbfs.c b/src/stm32/usbfs.c
+index 5385c95..ddcf08a 100644
+--- a/src/stm32/usbfs.c
++++ b/src/stm32/usbfs.c
+@@ -429,11 +429,23 @@ usb_init(void)
+     USB->BCDR = USB_BCDR_DPPU;
+ #endif
+ 
+-    // Reset usb controller and enable interrupts
++    // ACE/GD32F303: External D+ pullup controlled by PB9
++    // (transistor + 1.5kΩ to D+). Drive PB9 low during init; set high later.
++    gpio_out_setup(GPIO('B', 9), 0);
++
++    // Initialize USB peripheral (CNTR resets to FRES|PDWN after enable_pclock)
++    // Step 1: Clear PDWN to power up the USB transceiver, keep FRES active
+     USB->CNTR = USB_CNTR_FRES;
+-    USB->DADDR = 0;
++    // Step 2: Wait for transceiver startup (tSTARTUP >= 1µs per reference manual;
++    //         GD32F303 may need longer than genuine STM32F103)
++    udelay(10);
++    // Step 3: Clear FRES and enable USB-reset interrupt.
++    //         DADDR.EF is set later in usb_reset() on first host reset.
+     USB->CNTR = USB_CNTR_RESETM;
+     USB->ISTR = 0;
+     armcm_enable_irq(USB_IRQHandler, USBx_IRQn, 1);
++
++    // ACE/GD32F303: Enable external D+ pullup via PB9
++    gpio_out_setup(GPIO('B', 9), 1);
+ }
+ DECL_INIT(usb_init);

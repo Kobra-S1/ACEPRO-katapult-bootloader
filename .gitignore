@@ -1,0 +1,6 @@
+# Build artifacts
+*.o
+*.elf
+*.map
+katapult.bin
+__pycache__/
