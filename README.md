@@ -98,6 +98,10 @@ Klipper (running again)
 > and **soldering a pin header** to the unpopulated SWD pads. Only relevant if
 > you own an SWD debugger (ST-Link v2, Black Magic Probe, J-Link, etc.).
 
+SWD wiring reference for **ST-Link v2** or **Black Magic Probe**:
+
+![ACE Pro SWD wiring for ST-Link v2 / Black Magic Probe](./swd.png)
+
 If you have an SWD debugger, **dump the entire flash before doing anything**.
 The GD32F303 disables SWD at startup — hold NRST low during connect.
 
