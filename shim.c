@@ -147,6 +147,15 @@ void shim_main(void)
     if (katapult_size == 0 || katapult_size > (STOCK_BL_END - STOCK_BL_START))
         while (1);  /* hang — something is very wrong */
 
+    /* Step 2b: Validate MSP in embedded katapult.bin points to GD32F303 SRAM.
+     *          Catches wrong-MCU builds (e.g. LPC1768 with RAM at 0x10000000). */
+    uint32_t payload_msp = (uint32_t)katapult_bin_start[0]
+                         | ((uint32_t)katapult_bin_start[1] << 8)
+                         | ((uint32_t)katapult_bin_start[2] << 16)
+                         | ((uint32_t)katapult_bin_start[3] << 24);
+    if ((payload_msp & 0xFFFF0000UL) != 0x20000000UL)
+        while (1);  /* hang — katapult.bin built for wrong MCU */
+
     /* Step 3: Unlock flash */
     flash_unlock();
 

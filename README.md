@@ -15,6 +15,25 @@
 
 ---
 
+## Contents
+
+- [Hardware](#hardware)
+- [How It Works](#how-it-works)
+- [Prerequisites](#prerequisites)
+- [Back Up Your Flash First (Optional)](#back-up-your-flash-first-optional)
+- [Quick Start (Pre-Built)](#quick-start-pre-built)
+- [Building From Source](#building-from-source)
+- [Flashing Klipper](#flashing-klipper)
+- [Updating Klipper Later](#updating-klipper-later)
+- [Switching to Stock ACE Firmware](#switching-to-stock-ace-firmware)
+- [Cheat Sheet](#cheat-sheet)
+- [Warning](#warning)
+- [File Overview](#file-overview)
+- [Memory Map](#memory-map)
+- [Credits](#credits)
+
+---
+
 Install the [Katapult](https://github.com/Arksine/katapult) bootloader on an
 **Anycubic Color Engine Pro (ACE Pro)** — no SWD debugger required.
 
@@ -24,6 +43,11 @@ can flash [Klipper](https://github.com/Klipper3d/klipper) **or the stock ACE
 firmware** over USB without opening the device. Katapult uses a 32 KiB offset
 (`0x08008000`) — the same base address as the stock ACE app — enabling
 software-only switching between Klipper and patched stock firmware.
+
+**Just want to flash?** Jump to the [Cheat Sheet](#cheat-sheet) for
+copy-paste commands using the pre-built binaries from this repo.
+The rest of this document covers the full build-from-source process,
+firmware patching, and technical details.
 
 ## Hardware
 
@@ -82,14 +106,15 @@ Klipper (running again)
 - **ACE Pro with stock firmware** — must respond on USB as `ANYCUBIC ACE`
 - **Python 3.8+** with `pyserial`:
   ```bash
-  pip install pyserial
+  sudo apt install python3-serial   # Debian/Ubuntu
+  # or: pip install --user pyserial
   ```
-- **ARM GCC toolchain** (only needed if building from source):
+- **ARM GCC toolchain** (only needed if building from source or using Black Magic Probe):
   ```bash
-  # Ubuntu/Debian
-  sudo apt install gcc-arm-none-eabi
+  # Ubuntu/Debian — includes arm-none-eabi-gdb and arm-none-eabi-objcopy
+  sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi
   # Fedora
-  sudo dnf install arm-none-eabi-gcc-cs arm-none-eabi-newlib
+  sudo dnf install arm-none-eabi-gcc-cs arm-none-eabi-newlib arm-none-eabi-binutils-cs
   ```
 
 ## Back Up Your Flash First (Optional)
@@ -103,9 +128,11 @@ SWD wiring reference for **ST-Link v2** or **Black Magic Probe**:
 ![ACE Pro SWD wiring for ST-Link v2 / Black Magic Probe](./swd.png)
 
 If you have an SWD debugger, **dump the entire flash before doing anything**.
-The GD32F303 disables SWD at startup — hold NRST low during connect.
+The GD32F303 remaps SWD pins at startup — NRST must be held low during
+connect. The Black Magic Probe handles this automatically via
+`monitor connect_rst enable` (direct GPIO control of NRST).
 
-**Black Magic Probe:**
+**Black Magic Probe (recommended):**
 ```bash
 arm-none-eabi-gdb -batch \
   -ex "target extended-remote /dev/serial/by-id/usb-Black_Magic_Debug_*-if00" \
@@ -116,22 +143,34 @@ arm-none-eabi-gdb -batch \
   -ex "detach"
 ```
 
-**ST-Link v2 (OpenOCD):**
-```bash
-openocd -f interface/stlink.cfg -c "transport select hla_swd" \
-  -f target/stm32f1x.cfg \
-  -c "reset_config srst_only srst_nogate connect_assert_srst" \
-  -c "init; reset halt" \
-  -c "flash read_bank 0 ace_full_256k.bin 0 0x40000" \
-  -c "shutdown"
-```
-
 This gives you a full 256 KiB image (`ace_full_256k.bin`) — stock bootloader +
 app + OTA staging area. With this backup you can always recover via SWD.
+
+**Restore a full backup via Black Magic Probe:**
+```bash
+# Convert raw .bin to ELF (GDB 'load' requires ELF, not raw binary)
+arm-none-eabi-objcopy -I binary -O elf32-littlearm \
+  --change-section-address .data=0x08000000 \
+  ace_full_256k.bin ace_full_256k.elf
+
+# Flash via BMP
+arm-none-eabi-gdb -batch \
+  -ex "target extended-remote /dev/serial/by-id/usb-Black_Magic_Debug_*-if00" \
+  -ex "monitor connect_rst enable" \
+  -ex "monitor swd_scan" \
+  -ex "attach 1" \
+  -ex "load ace_full_256k.elf" \
+  -ex "compare-sections" \
+  -ex "detach"
+```
 
 ## Quick Start (Pre-Built)
 
 A pre-built `shim.bin` is included for convenience. If you trust it:
+
+> **Note:** Serial ports require permissions. Either use `sudo` or add your
+> user to the `dialout` group: `sudo usermod -aG dialout $USER` (log out/in
+> to take effect).
 
 ```bash
 # 1. Find your ACE serial port
@@ -139,7 +178,7 @@ ls /dev/serial/by-id/ | grep -i ace
 # Example: usb-ANYCUBIC_ACE_1-if00
 
 # 2. Install Katapult (replaces stock bootloader — irreversible without SWD)
-python3 ota_install_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+sudo python3 ota_install_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
 
 # 3. Wait ~10 seconds, then verify Katapult is running
 lsusb | grep 1d50:6177
@@ -186,21 +225,25 @@ git clone https://github.com/Arksine/katapult.git
 cd katapult
 git apply ../ACEPRO-katapult-bootloader/katapult-ace-gd32f303.patch
 make menuconfig
-# STM32 → STM32F103 → 256KiB/48KiB → USB on PA11/PA12
-# 32KiB bootloader offset → double-reset enabled (500ms)
-make -j$(nproc)
-# Result: out/katapult.bin (should be ~4 KiB)
 ```
 
-The Katapult `.config` should have:
-```
-CONFIG_MACH_STM32F103=y
-CONFIG_MACH_STM32F103xC=y         # 256KiB / 48KiB for GD32F303
-CONFIG_STM32_USB_PA11_PA12=y      # USB on PA11/PA12
-CONFIG_USB=y
-CONFIG_STM32_APP_START_8000=y     # 32KiB app offset (matches stock ACE base)
-CONFIG_LAUNCH_APP_ADDRESS=0x8008000
-CONFIG_ENABLE_DOUBLE_RESET=y      # Double-reset enters bootloader (500ms window)
+> **🚨⚠️🚨 CRITICAL — Set these exact values in menuconfig. 🚨⚠️🚨**
+> A wrong selection will build Katapult for the wrong MCU and **brick your
+> device**. The build will abort if the MSP check fails, but double-check
+> before flashing.
+
+| Setting | Value |
+|---------|-------|
+| Micro-controller Architecture | **STM32** |
+| Processor model | **STM32F103** |
+| Flash/RAM variant (Low Level) | **256KiB Flash / 48KiB RAM** |
+| USB interface | **USB on PA11/PA12** |
+| Application start offset | **32KiB offset** |
+| Enable double-reset bootloader entry | **yes** (500ms) |
+
+```bash
+make -j$(nproc)
+# Result: out/katapult.bin (should be ~4 KiB)
 ```
 
 ### 2. Build the Shim
@@ -218,12 +261,21 @@ make KATAPULT_BIN=/path/to/katapult.bin
 make CROSS_PREFIX=/path/to/arm-none-eabi-
 ```
 
-Output: `shim.bin` (~4.5 KiB)
+Output: `shim.bin` (~5 KiB)
+
+> **Safety checks:** Two layers protect against flashing a wrong-MCU Katapult
+> binary:
+> 1. **Build-time** — the Makefile validates that the first 4 bytes of
+>    `katapult.bin` (the initial MSP) point to GD32F303 SRAM (`0x2000xxxx`).
+>    The build aborts with an error if they don't.
+> 2. **Runtime** — `shim.c` checks the embedded Katapult MSP before erasing
+>    flash. If the MSP is outside `0x2000xxxx`, the shim hangs harmlessly
+>    instead of bricking the device.
 
 ### 3. Flash
 
 ```bash
-python3 ota_install_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+sudo python3 ota_install_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
 ```
 
 The script will:
@@ -257,7 +309,7 @@ make menuconfig
 make -j$(nproc)
 
 # 3. Flash via Katapult
-python3 /path/to/katapult/scripts/flash_can.py \
+sudo python3 /path/to/katapult/scripts/flash_can.py \
   -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
   -f out/klipper.bin
 
@@ -295,12 +347,12 @@ future, enter the bootloader and flash again:
 
 ```bash
 # From a running Klipper, request bootloader mode:
-python3 /path/to/katapult/scripts/flash_can.py \
+sudo python3 /path/to/katapult/scripts/flash_can.py \
   -d /dev/serial/by-id/usb-Klipper_stm32f103xe_*-if00 \
   -r
 
 # Then flash:
-python3 /path/to/katapult/scripts/flash_can.py \
+sudo python3 /path/to/katapult/scripts/flash_can.py \
   -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
   -f klipper/out/klipper.bin
 ```
@@ -321,6 +373,7 @@ Downloads (hosted by the [Rinkhals](https://github.com/jbatonnet/Rinkhals) proje
 
 | Version | URL |
 |---------|-----|
+| V1.3.863 | https://drive.google.com/file/d/1WwSRlEp_iudO2CpcRVHwhFUiVPLMVoIp/view?usp=sharing |
 | V1.3.84 | https://rinkhals.thedju.net/Other/ACE_1.3.84.swu |
 | V1.3.76 | https://rinkhals.thedju.net/Other/ACE_1.3.76.swu |
 
@@ -343,6 +396,7 @@ Verify the SHA-256 checksum:
 
 | File | SHA-256 |
 |------|---------|
+| `ACE_V1.3.863_20250518.bin` | `3f3676ba357749b3d0367922cb7f6b0dedc9b3d104c1c29e719ac3e563f5eb63` |
 | `ACE_V1.3.84_20240929.bin` | `36c3986fdc9d3e4e304ad281152c1ee794e49c2d421534f04b037affd02a8efd` |
 | `ACE_V1.3.76_20240703.bin` | `e02cce88910083555d2d8f97a89daa1da336ddfb760c12295017085e7f6603d2` |
 
@@ -433,12 +487,12 @@ bytes of that function with the payload hex above.
 
 ```bash
 # Enter Katapult from running Klipper
-python3 /path/to/katapult/scripts/flash_can.py \
+sudo python3 /path/to/katapult/scripts/flash_can.py \
   -d /dev/serial/by-id/usb-Klipper_stm32f103xe_*-if00 \
   -r
 
 # Flash the patched ACE firmware
-python3 /path/to/katapult/scripts/flash_can.py \
+sudo python3 /path/to/katapult/scripts/flash_can.py \
   -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
   -f ACE_V1.3.84_20240929_katapult.bin
 ```
@@ -449,13 +503,59 @@ The ACE Pro will now boot the stock ACE firmware and appear as
 ### 4. Re-enter Katapult from Stock ACE
 
 ```bash
-python3 enter_katapult.py
-# or: python3 enter_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+sudo python3 enter_katapult.py
+# or: sudo python3 enter_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
 ```
 
 This sends the `iap_upgrade` JSON-RPC command, which triggers the patched
 `ota_set_upgrade_params()` reboot-to-Katapult code. The device reboots into
 Katapult (`1d50:6177`) and you can flash Klipper again.
+
+## Cheat Sheet
+
+Copy-paste commands from the repo root. Only dependency: clone Katapult once
+for `flash_can.py` (no build needed):
+
+```bash
+sudo apt install python3-serial            # Debian/Ubuntu
+git clone https://github.com/Arksine/katapult.git /tmp/katapult 2>/dev/null || true
+```
+
+**Install Katapult (first time, from stock ACE — irreversible without SWD):**
+```bash
+sudo python3 ota_install_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+```
+
+**Flash Klipper (Katapult already running):**
+```bash
+sudo python3 /tmp/katapult/scripts/flash_can.py \
+  -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
+  -f /path/to/klipper.bin
+```
+
+**Klipper → Katapult → flash something else:**
+```bash
+sudo python3 /tmp/katapult/scripts/flash_can.py \
+  -d /dev/serial/by-id/usb-Klipper_stm32f103xe_*-if00 -r
+sleep 3
+sudo python3 /tmp/katapult/scripts/flash_can.py \
+  -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
+  -f /path/to/firmware.bin
+```
+
+**Stock ACE (patched) → Katapult → flash something else:**
+```bash
+sudo python3 enter_katapult.py --port /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+sleep 3
+sudo python3 /tmp/katapult/scripts/flash_can.py \
+  -d /dev/serial/by-id/usb-katapult_stm32f103xe_*-if00 \
+  -f /path/to/firmware.bin
+```
+
+**Verify what's running:**
+```bash
+ls /dev/serial/by-id/ | grep -E '(ANYCUBIC|Klipper|katapult)'
+```
 
 ## Warning
 
@@ -480,9 +580,11 @@ Katapult (`1d50:6177`) and you can flash Klipper again.
 | `ota_install_katapult.py` | Host-side installer script (initial Katapult installation via stock OTA) |
 | `ace_ota.py` | ACE OTA protocol library (USB CDC JSON-RPC + binary chunks) |
 | `shim.bin` | Pre-built shim binary (includes Katapult v0.0.1) |
+| `katapult.bin` | Pre-built Katapult binary for GD32F303 (embedded in `shim.bin`) |
 | `katapult-ace-gd32f303.patch` | Patch for upstream Katapult — GD32F303 config, 32KiB offset, PB9 USB fix |
 | `patch_ace_katapult.py` | Patches stock ACE firmware to reboot into Katapult on `iap_upgrade` |
 | `enter_katapult.py` | Sends `iap_upgrade` to patched ACE firmware to re-enter Katapult |
+| `swd.png` | SWD wiring reference photo for ST-Link v2 / Black Magic Probe |
 
 ## Memory Map
 

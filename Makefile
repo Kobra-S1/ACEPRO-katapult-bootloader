@@ -44,6 +44,21 @@ all: shim.bin
 # Check that katapult.bin exists before building
 katapult.bin: $(KATAPULT_BIN)
 	@test -f $(KATAPULT_BIN) || { echo "ERROR: $(KATAPULT_BIN) not found. Build Katapult first."; exit 1; }
+	@# Validate MSP (first 4 bytes) points to GD32F303 SRAM (0x20000000-0x2000BFFF)
+	@MSP=$$(od -A n -t x4 -N 4 $(KATAPULT_BIN) | tr -d ' '); \
+	 MSP_HI=$$(echo $$MSP | cut -c1-4); \
+	 if [ "$$MSP_HI" != "2000" ]; then \
+	   echo ""; \
+	   echo "ERROR: katapult.bin has wrong MSP: 0x$$MSP"; \
+	   echo "  Expected MSP in 0x2000xxxx (GD32F303 SRAM)"; \
+	   echo "  This binary was built for the WRONG MCU!"; \
+	   echo ""; \
+	   echo "  Fix: re-run 'make menuconfig' in your katapult directory and select:"; \
+	   echo "    STM32 → STM32F103 → 256KiB/48KiB → USB PA11/PA12 → 32KiB offset"; \
+	   echo "  Then rebuild: make -j\$$(nproc)"; \
+	   echo ""; \
+	   exit 1; \
+	 fi
 	cp $(KATAPULT_BIN) katapult.bin
 
 katapult_payload.o: katapult_payload.S katapult.bin

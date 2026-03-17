@@ -20,6 +20,10 @@ import argparse
 import os
 import re
 import sys
+from typing import List, Match
+
+FULL_FLASH_SIZE = 256 * 1024
+BOOTLOADER_SIZE = 32 * 1024
 
 # ---------- Signature of ota_set_upgrade_params() ----------
 # This matches the function's early-return path:
@@ -79,6 +83,40 @@ PAYLOAD = bytes.fromhex(
 assert len(PAYLOAD) == 48, f"Payload must be 48 bytes, got {len(PAYLOAD)}"
 
 
+def select_signature_offset(fw: bytes, matches: List[Match[bytes]]) -> int:
+    """Pick the correct ota_set_upgrade_params() signature occurrence.
+
+    For raw 256 KiB full-flash dumps, prefer a unique match in the app region
+    (offset >= 0x8000). This avoids false positives from the stock bootloader.
+    For app-only binaries, require a unique match to stay conservative.
+    """
+    if len(matches) == 1:
+        return matches[0].start()
+
+    # Full-chip dumps include the first-stage bootloader at 0x08000000.
+    # ota_set_upgrade_params() lives in the app image at 0x08008000+.
+    if len(fw) == FULL_FLASH_SIZE:
+        app_matches = [m.start() for m in matches if m.start() >= BOOTLOADER_SIZE]
+        if len(app_matches) == 1:
+            return app_matches[0]
+
+    offsets = [f"0x{m.start():04X}" for m in matches]
+    raise ValueError(
+        f"Multiple signature matches ({offsets}) — ambiguous, refusing to patch."
+    )
+
+
+def image_base_addr(fw_len: int) -> int:
+    """Return the flash base represented by file offset 0.
+
+    - Full 256 KiB dump: file starts at 0x08000000
+    - App-only firmware blob: file starts at 0x08008000
+    """
+    if fw_len == FULL_FLASH_SIZE:
+        return 0x08000000
+    return 0x08008000
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Patch ACE firmware for Katapult reboot on iap_upgrade")
     ap.add_argument("firmware", help="Input .bin firmware file")
@@ -104,13 +142,14 @@ def main() -> int:
         print("ERROR: ota_set_upgrade_params() signature not found in firmware.")
         print("       This firmware version may have a different function layout.")
         return 1
-    if len(matches) > 1:
-        offsets = [f"0x{m.start():04X}" for m in matches]
-        print(f"ERROR: Multiple signature matches ({offsets}) — ambiguous, refusing to patch.")
+
+    try:
+        offset = select_signature_offset(fw, matches)
+    except ValueError as e:
+        print(f"ERROR: {e}")
         return 1
 
-    offset = matches[0].start()
-    addr = 0x08008000 + offset
+    addr = image_base_addr(len(fw)) + offset
     print(f"Found:  ota_set_upgrade_params() at offset 0x{offset:04X} (addr 0x{addr:08X})")
 
     # Show what we're replacing
